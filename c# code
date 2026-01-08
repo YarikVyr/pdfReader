@@ -1,0 +1,116 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Text;
+using System.Text.RegularExpressions;
+using System.Threading;
+using UglyToad.PdfPig;
+using UglyToad.PdfPig.DocumentLayoutAnalysis;
+using UglyToad.PdfPig.DocumentLayoutAnalysis.PageSegmenter;
+using UglyToad.PdfPig.DocumentLayoutAnalysis.WordExtractor;
+
+class Program
+{
+    static void Main()
+    {
+        Console.OutputEncoding = Encoding.UTF8;
+        Console.Write("Введите путь к PDF файлу или папке: ");
+        string inputPath = Console.ReadLine()?.Trim().Trim('"');
+
+        if (string.IsNullOrEmpty(inputPath)) return;
+
+        Console.Write("Введите скорость чтения (мс): ");
+        if (!int.TryParse(Console.ReadLine(), out int delay)) delay = 500;
+
+        Console.Clear();
+
+        if (File.Exists(inputPath)) ReadPdf(inputPath, delay);
+        else if (Directory.Exists(inputPath))
+        {
+            var pdfFiles = Directory.GetFiles(inputPath, "*.pdf").OrderBy(f => f);
+            foreach (var pdf in pdfFiles) ReadPdf(pdf, delay);
+        }
+        else Console.WriteLine("Путь не найден.");
+
+        Console.WriteLine("\nЧтение завершено.");
+        Console.ReadKey();
+    }
+
+    static void ReadPdf(string path, int delay)
+    {
+        try
+        {
+            using var document = PdfDocument.Open(path);
+            foreach (var page in document.GetPages())
+            {
+                var words = page.GetWords(NearestNeighbourWordExtractor.Instance);
+                if (!words.Any()) continue;
+
+                var blocks = DocstrumBoundingBoxes.Instance.GetBlocks(words);
+
+                foreach (var block in blocks)
+                {
+                    StringBuilder paragraphBuffer = new StringBuilder();
+
+                    foreach (var line in block.TextLines)
+                    {
+                        string cleanLine = line.Text.Trim();
+                        if (string.IsNullOrWhiteSpace(cleanLine)) continue;
+
+                        if (paragraphBuffer.Length > 0 && IsNewBlockStart(cleanLine, paragraphBuffer.ToString()))
+                        {
+                            WriteWrapped(paragraphBuffer.ToString());
+                            Console.WriteLine();
+                            Thread.Sleep(delay);
+                            paragraphBuffer.Clear();
+                        }
+
+                        if (paragraphBuffer.Length > 0) paragraphBuffer.Append(" ");
+                        paragraphBuffer.Append(cleanLine);
+                    }
+
+                    if (paragraphBuffer.Length > 0)
+                    {
+                        WriteWrapped(paragraphBuffer.ToString());
+                        Console.WriteLine();
+                        Thread.Sleep(delay);
+                    }
+                }
+            }
+        }
+        catch (Exception ex) { Console.WriteLine($"Ошибка: {ex.Message}"); }
+    }
+
+    static bool IsNewBlockStart(string currentLine, string buffer)
+    {
+        string b = buffer.Trim();
+        if (b.EndsWith(".") || b.EndsWith("!") || b.EndsWith("?")) return true;
+
+        if (currentLine.Length < 40 && char.IsUpper(currentLine[0])) return true;
+
+        return false;
+    }
+
+    static void WriteWrapped(string text)
+    {
+        int width = Console.WindowWidth - 1;
+        if (width <= 0) width = 80;
+
+        string sanitizedText = Regex.Replace(text, @"\s+", " ");
+        string[] words = sanitizedText.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+
+        int currentLineLength = 0;
+        foreach (var word in words)
+        {
+            if (currentLineLength + word.Length + 1 >= width)
+            {
+                Console.WriteLine();
+                currentLineLength = 0;
+            }
+            Console.Write(word + " ");
+            currentLineLength += word.Length + 1;
+        }
+        Console.WriteLine();
+    }
+}
