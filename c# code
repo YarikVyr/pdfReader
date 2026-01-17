@@ -3,108 +3,199 @@ using System.Text.RegularExpressions;
 using UglyToad.PdfPig;
 using UglyToad.PdfPig.DocumentLayoutAnalysis.PageSegmenter;
 using UglyToad.PdfPig.DocumentLayoutAnalysis.WordExtractor;
+using QuestPDF.Fluent;
+using QuestPDF.Helpers;
+using QuestPDF.Infrastructure;
 
-class Program
+// Лицензия QuestPDF
+QuestPDF.Settings.License = LicenseType.Community;
+
+// Поддержка русского текста в консоли
+Console.OutputEncoding = Encoding.UTF8;
+
+// Стартовое сообщение
+Console.WriteLine("Pdf Reader");
+Console.WriteLine("Нажмите Enter для начала...");
+Console.ReadLine();
+
+string inputPath = "";
+
+// Ввод пути к файлу или папки
+while (true)
 {
-    static void Main()
+    Console.ForegroundColor = ConsoleColor.Cyan;
+    Console.Write("Введите путь к файлу (PDF/TXT) или папке: ");
+    Console.ResetColor();
+
+    inputPath = Console.ReadLine()?.Trim().Trim('"');
+
+    // Проверка на пустой ввод
+    if (string.IsNullOrWhiteSpace(inputPath))
     {
-        Console.OutputEncoding = Encoding.UTF8;
-        Console.Write("Введите путь к PDF файлу или папке: ");
-        string inputPath = Console.ReadLine()?.Trim().Trim('"');
-
-        if (string.IsNullOrEmpty(inputPath)) return;
-
-        Console.Write("Введите скорость чтения (мс): ");
-        if (!int.TryParse(Console.ReadLine(), out int delay)) delay = 500;
-
-        Console.Clear();
-
-        if (File.Exists(inputPath)) ReadPdf(inputPath, delay);
-        else if (Directory.Exists(inputPath))
-        {
-            var pdfFiles = Directory.GetFiles(inputPath, "*.pdf").OrderBy(f => f);
-            foreach (var pdf in pdfFiles) ReadPdf(pdf, delay);
-        }
-        else Console.WriteLine("Путь не найден.");
-
-        Console.WriteLine("\nЧтение завершено.");
-        Console.ReadKey();
+        Console.WriteLine("Путь не может быть пустым.\n");
+        continue;
     }
 
-    static void ReadPdf(string path, int delay)
+    // Проверка существования файла или папки
+    if (File.Exists(inputPath) || Directory.Exists(inputPath))
+        break;
+
+    Console.WriteLine("Путь не найден. Попробуйте снова.\n");
+}
+
+// Вводзадержки между абзацами
+Console.Write("Введите скорость чтения (мс) [500]: ");
+int delay;
+if (!int.TryParse(Console.ReadLine(), out delay))
+    delay = 500;
+
+Console.Clear();
+
+// Обработка файла или папки
+if (File.Exists(inputPath))
+{
+    ProcessFile(inputPath);
+}
+else
+{
+    // Берём только TXT и PDF файлы
+    var files = Directory.GetFiles(inputPath)
+        .Where(f => f.EndsWith(".txt") || f.EndsWith(".pdf"))
+        .OrderBy(f => f);
+
+    if (!files.Any())
+        Console.WriteLine("В папке нет файлов для обработки.");
+
+    foreach (var file in files)
+        ProcessFile(file);
+}
+
+Console.WriteLine("\nГотово. Нажмите Enter для выхода.");
+Console.ReadLine();
+
+
+// Методы
+
+// Определяет тип файла и вызывает нужную обработку
+void ProcessFile(string path)
+{
+    var ext = Path.GetExtension(path).ToLower();
+
+    if (ext == ".txt")
     {
-        try
+        // TXT - PDF - чтение
+        var pdfPath = Path.ChangeExtension(path, ".pdf");
+        TxtToPdf(path, pdfPath);
+        Console.WriteLine($"[OK] TXT → PDF: {Path.GetFileName(path)}");
+        ReadPdf(pdfPath);
+    }
+    else if (ext == ".pdf")
+    {
+        // Просто чтение PDF
+        ReadPdf(path);
+    }
+}
+
+// Конвертация TXT файла в PDF с помощью QuestPDF
+void TxtToPdf(string txtPath, string pdfPath)
+{
+    string content = File.ReadAllText(txtPath, Encoding.UTF8);
+
+    Document.Create(container =>
+    {
+        container.Page(page =>
         {
-            using var document = PdfDocument.Open(path);
-            foreach (var page in document.GetPages())
+            page.Margin(1, Unit.Centimetre);
+            page.PageColor(Colors.White);
+            page.DefaultTextStyle(x => x.FontSize(12).FontFamily(Fonts.Verdana));
+            page.Content().Text(content);
+        });
+    }).GeneratePdf(pdfPath);
+}
+
+// Чтение PDF и вывод текста абзацами
+void ReadPdf(string path)
+{
+    Console.ForegroundColor = ConsoleColor.Yellow;
+    Console.WriteLine($"\n>>> {Path.GetFileName(path)} <<<\n");
+    Console.ResetColor();
+
+    using var document = PdfDocument.Open(path);
+
+    foreach (var page in document.GetPages())
+    {
+        // Извлекаем слова с сохранением координат
+        var words = page.GetWords(NearestNeighbourWordExtractor.Instance);
+        if (!words.Any()) continue;
+
+        // Группируем слова в логические блоки
+        var blocks = DocstrumBoundingBoxes.Instance.GetBlocks(words);
+
+        foreach (var block in blocks)
+        {
+            StringBuilder paragraph = new();
+
+            foreach (var line in block.TextLines)
             {
-                var words = page.GetWords(NearestNeighbourWordExtractor.Instance);
-                if (!words.Any()) continue;
+                string lineText = line.Text.Trim();
+                if (string.IsNullOrWhiteSpace(lineText))
+                    continue;
 
-                var blocks = DocstrumBoundingBoxes.Instance.GetBlocks(words);
-
-                foreach (var block in blocks)
+                // Проверяем, начинается ли новый абзац
+                if (paragraph.Length > 0 && IsNewParagraph(lineText, paragraph.ToString()))
                 {
-                    StringBuilder paragraphBuffer = new StringBuilder();
-
-                    foreach (var line in block.TextLines)
-                    {
-                        string cleanLine = line.Text.Trim();
-                        if (string.IsNullOrWhiteSpace(cleanLine)) continue;
-
-                        if (paragraphBuffer.Length > 0 && IsNewBlockStart(cleanLine, paragraphBuffer.ToString()))
-                        {
-                            WriteWrapped(paragraphBuffer.ToString());
-                            Console.WriteLine();
-                            Thread.Sleep(delay);
-                            paragraphBuffer.Clear();
-                        }
-
-                        if (paragraphBuffer.Length > 0) paragraphBuffer.Append(" ");
-                        paragraphBuffer.Append(cleanLine);
-                    }
-
-                    if (paragraphBuffer.Length > 0)
-                    {
-                        WriteWrapped(paragraphBuffer.ToString());
-                        Console.WriteLine();
-                        Thread.Sleep(delay);
-                    }
+                    WriteWrapped(paragraph.ToString());
+                    Console.WriteLine();
+                    Thread.Sleep(delay);
+                    paragraph.Clear();
                 }
+
+                if (paragraph.Length > 0)
+                    paragraph.Append(" ");
+
+                paragraph.Append(lineText);
             }
-        }
-        catch (Exception ex) { Console.WriteLine($"Ошибка: {ex.Message}"); }
-    }
 
-    static bool IsNewBlockStart(string currentLine, string buffer)
-    {
-        string b = buffer.Trim();
-        if (b.EndsWith(".") || b.EndsWith("!") || b.EndsWith("?")) return true;
-
-        if (currentLine.Length < 40 && char.IsUpper(currentLine[0])) return true;
-
-        return false;
-    }
-
-    static void WriteWrapped(string text)
-    {
-        int width = Console.WindowWidth - 1;
-        if (width <= 0) width = 80;
-
-        string sanitizedText = Regex.Replace(text, @"\s+", " ");
-        string[] words = sanitizedText.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
-
-        int currentLineLength = 0;
-        foreach (var word in words)
-        {
-            if (currentLineLength + word.Length + 1 >= width)
+            // Вывод последнего абзаца блока
+            if (paragraph.Length > 0)
             {
+                WriteWrapped(paragraph.ToString());
                 Console.WriteLine();
-                currentLineLength = 0;
+                Thread.Sleep(delay);
             }
-            Console.Write(word + " ");
-            currentLineLength += word.Length + 1;
         }
-        Console.WriteLine();
     }
+}
+
+// Эвристика определения начала нового абзаца
+bool IsNewParagraph(string currentLine, string buffer)
+{
+    buffer = buffer.Trim();
+
+    // Конец предложения
+    if (buffer.EndsWith(".") || buffer.EndsWith("!") || buffer.EndsWith("?"))
+        return true;
+
+    // Короткая строка с заглавной буквы
+    if (currentLine.Length < 40 && char.IsUpper(currentLine[0]))
+        return true;
+
+    return false;
+}
+
+// Красивый перенос текста по ширине консоли
+void WriteWrapped(string text)
+{
+    int width = Console.WindowWidth - 1;
+    if (width < 20) width = 80;
+
+    string clean = Regex.Replace(text, @"\s+", " ");
+    foreach (var word in clean.Split(' '))
+    {
+        if (Console.CursorLeft + word.Length + 1 >= width)
+            Console.WriteLine();
+
+        Console.Write(word + " ");
+    }
+    Console.WriteLine();
 }
